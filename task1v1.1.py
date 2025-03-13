@@ -2,8 +2,63 @@ import numpy as np
 import struct
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error
-import math
+from numba import njit
 import os
+
+# Some faster functions using Numba JIT
+
+@njit
+def float_to_bits_numba(f):
+    return np.uint64(np.asarray(f, dtype=np.float64).view(np.uint64))
+
+@njit
+def compress_floats_numba(float_array, keep_bits, round_off):
+    n = len(float_array)
+    compressed_ints = np.empty(n, dtype=np.uint64)
+
+    for i in range(n):
+        bits = float_to_bits_numba(float_array[i])
+
+        if round_off:
+            guard_pos = 64 - keep_bits - 1
+            guard_bit = (bits >> guard_pos) & 1 if guard_pos >= 0 else 0
+            sticky_bits = bits & ((1 << guard_pos) - 1) if guard_pos > 0 else 0
+            sticky_bit = 1 if sticky_bits != 0 else 0
+
+            preserved_bits = bits >> (64 - keep_bits)
+            lsb = preserved_bits & 1
+
+            if guard_bit == 1 and (sticky_bit == 1 or lsb == 1):
+                preserved_bits += 1
+                if preserved_bits >= (1 << keep_bits):  # overflow
+                    preserved_bits -= 1
+        else:
+            preserved_bits = bits >> (64 - keep_bits)
+
+        compressed_ints[i] = preserved_bits
+
+    # Bitpack into a uint8 buffer
+    total_bits = 0
+    bitstream = 0
+    max_bytes = ((keep_bits * n + 7) // 8)  # max size in bytes
+    output_bytes = np.zeros(max_bytes, dtype=np.uint8)
+    byte_idx = 0
+
+    for i in range(n):
+        bitstream = (bitstream << keep_bits) | compressed_ints[i]
+        total_bits += keep_bits
+
+        while total_bits >= 8:
+            total_bits -= 8
+            output_bytes[byte_idx] = (bitstream >> total_bits) & 0xFF
+            byte_idx += 1
+
+    # Handle leftover bits
+    if total_bits > 0:
+        output_bytes[byte_idx] = (bitstream << (8 - total_bits)) & 0xFF
+        byte_idx += 1
+
+    return output_bytes[:byte_idx]
 
 class FloatBitConverter:
     """
@@ -11,31 +66,13 @@ class FloatBitConverter:
     """
     @staticmethod
     def float_to_bits(f):
-        """
-        Convert a floating-point number to its 64-bit binary representation.
-        
-        Args:
-            f (float): The floating-point number to convert
-            
-        Returns:
-            str: A string of 64 bits representing the float in IEEE 754 format
-        """
-        [d] = struct.unpack(">Q", struct.pack(">d", f))
-        return f'{d:064b}'
+        """Convert float64 to uint64 bit representation."""
+        return struct.unpack(">Q", struct.pack(">d", f))[0]
 
     @staticmethod
     def bits_to_float(b):
-        """
-        Convert a 64-bit binary representation back to a floating-point number.
-        
-        Args:
-            b (str): A string of 64 bits representing a float in IEEE 754 format
-            
-        Returns:
-            float: The reconstructed floating-point number
-        """
-        d = int(b, 2)
-        return struct.unpack(">d", struct.pack(">Q", d))[0]
+        """Convert uint64 bit representation back to float64."""
+        return struct.unpack(">d", struct.pack(">Q", b))[0]
 
 class FloatCompressor:
     """
@@ -52,52 +89,11 @@ class FloatCompressor:
         """
         self.keep_bits = keep_bits
         self.round_off = round_off
+        self.bit_mask = (1 << keep_bits) - 1
 
     def compress(self, float_array):
-        """
-        Compress an array of floating-point numbers with optional rounding.
-
-        Args:
-            float_array (array-like): Floating-point numbers to compress.
-
-        Returns:
-            bytearray: Compressed bitstream as byte array.  
-        """
-        bitstream = ""
-        for num in float_array:
-            full_bits = FloatBitConverter.float_to_bits(num)
-            preserved_bits = full_bits[:self.keep_bits]
-
-            if self.round_off:
-                # Guard bit: first bit after preserved bits
-                guard_bit = full_bits[self.keep_bits] if self.keep_bits < 64 else '0'
-                # Sticky bit: OR of all bits after guard bit
-                sticky_bits = full_bits[self.keep_bits+1:] if self.keep_bits+1 < 64 else ''
-                sticky_bit = '1' if '1' in sticky_bits else '0'
-
-                # Round up if guard bit = 1 and (sticky_bit = 1 or last preserved bit = 1)
-                round_up = guard_bit == '1' and ('1' in sticky_bit or preserved_bits[-1] == '1')
-
-                if round_up:
-                    incremented = bin(int(preserved_bits, 2) + 1)[2:].zfill(self.keep_bits)
-
-                    # Overflow detection: length increases → fallback to truncation
-                    if len(incremented) > self.keep_bits:
-                        # Overflow occurred, fallback: just keep truncated version
-                        bitstream += preserved_bits
-                    else:
-                        bitstream += incremented
-                else:
-                    bitstream += preserved_bits
-            else:
-                bitstream += preserved_bits
-
-        # Pad to byte boundary
-        padded_len = math.ceil(len(bitstream) / 8) * 8
-        bitstream += '0' * (padded_len - len(bitstream))
-
-        byte_array = bytearray(int(bitstream[i:i+8], 2) for i in range(0, len(bitstream), 8))
-        return byte_array
+        compressed_np_bytes = compress_floats_numba(float_array, self.keep_bits, self.round_off)
+        return bytearray(compressed_np_bytes)
 
 class FloatDecompressor:
     """
@@ -113,27 +109,24 @@ class FloatDecompressor:
         self.keep_bits = keep_bits
 
     def decompress(self, byte_array, num_floats):
-        """
-        Decompress a byte array back into floating-point numbers.
-
-        Args:
-            byte_array (bytearray): The compressed data.
-            num_floats (int): Number of floats to recover from the compressed data.
-
-        Returns:
-            list: List of recovered floating-point numbers.
-        """
-        bitstream = ''.join(f'{byte:08b}' for byte in byte_array)
+        bitstream = 0
+        total_bits = 0
+        byte_idx = 0
         recovered_floats = []
-        for i in range(num_floats):
-            start = i * self.keep_bits
-            top_bits = bitstream[start:start+self.keep_bits]
 
-            # Fill remaining bits with zeros (zero padding in mantissa → denormalized value or lower precision)
-            full_bits = top_bits.ljust(64, '0')
+        for _ in range(num_floats):
+            while total_bits < self.keep_bits and byte_idx < len(byte_array):
+                bitstream = (bitstream << 8) | byte_array[byte_idx]
+                total_bits += 8
+                byte_idx += 1
 
-            # Reconstruct float
+            total_bits -= self.keep_bits
+            top_bits = (bitstream >> total_bits) & ((1 << self.keep_bits) - 1)
+            bitstream &= (1 << total_bits) - 1  # remove used bits
+
+            full_bits = top_bits << (64 - self.keep_bits)
             recovered_floats.append(FloatBitConverter.bits_to_float(full_bits))
+
         return recovered_floats
 
 class FileHandler:
@@ -289,5 +282,5 @@ class CompressionPipeline:
             self.analyzer.analyze_distribution(name, data, recovered_np)
 
 if __name__ == "__main__":
-    pipeline = CompressionPipeline()
+    pipeline = CompressionPipeline(size=100000)
     pipeline.run()
