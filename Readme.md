@@ -40,8 +40,9 @@ The compression and analysis code was written in Python using:
 - **Matplotlib** for visualization
 - **scikit-learn's MSE function** for error analysis
 - **struct module** for precise bit-level manipulation
+- **struct module** for precise bit-level manipulation
 
-📁 Files are saved in `bin/` directory and plots in `plots/`.
+Files are saved in `bin/` directory and plots in `plots/`.
 
 ---
 
