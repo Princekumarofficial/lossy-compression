@@ -5,8 +5,6 @@ from sklearn.metrics import mean_squared_error
 from numba import njit
 import os
 
-# Some faster functions using Numba JIT
-
 @njit
 def float_to_bits_numba(f):
     return np.uint64(np.asarray(f, dtype=np.float64).view(np.uint64))
