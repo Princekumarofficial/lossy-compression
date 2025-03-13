@@ -210,15 +210,16 @@ class DataAnalyzer:
         plt.savefig(f"{self.plots_dir}/{name}_sorted_plot.png")
         plt.show()
 
-        # Error Plot
+        # Error Percent Plot
+        error_percent = 100 * (data - recovered_np) / data
         plt.figure(figsize=(10, 3))
-        plt.plot(data - recovered_np, color='purple')
-        plt.title(f"{name.capitalize()} Value Error (Original - Compressed)")
+        plt.plot(error_percent, color='purple')
+        plt.title(f"{name.capitalize()} Value Error Percent (Original - Compressed) / Original * 100")
         plt.xlabel("Index")
-        plt.ylabel("Error")
+        plt.ylabel("Error Percent")
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(f"{self.plots_dir}/{name}_error_plot.png")
+        plt.savefig(f"{self.plots_dir}/{name}_error_percent_plot.png")
         plt.show()
 
 class CompressionPipeline:
@@ -280,5 +281,5 @@ class CompressionPipeline:
             self.analyzer.analyze_distribution(name, data, recovered_np)
 
 if __name__ == "__main__":
-    pipeline = CompressionPipeline(size=100000)
+    pipeline = CompressionPipeline(size=1000, keep_bits=56)
     pipeline.run()
