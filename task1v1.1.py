@@ -39,50 +39,64 @@ class FloatBitConverter:
 
 class FloatCompressor:
     """
-    Compresses floating-point numbers by preserving only a specified number of significant bits.
+    Compresses floating-point numbers by preserving only a specified number of significant bits,
+    with optional IEEE 754-aware rounding using guard and sticky bits.
     """
-    def __init__(self, keep_bits=48, round_off=False):
+    def __init__(self, keep_bits=48, round_off=True):
         """
         Initialize the compressor with compression parameters.
-        
+
         Args:
-            keep_bits (int): Number of most significant bits to keep from each float
-            round_off (bool): Whether to round values when truncating bits
+            keep_bits (int): Number of most significant bits to keep from each float.
+            round_off (bool): Whether to use guard + sticky bit rounding when truncating.
         """
         self.keep_bits = keep_bits
         self.round_off = round_off
 
     def compress(self, float_array):
         """
-        Compress an array of floating-point numbers.
-        
+        Compress an array of floating-point numbers with optional rounding.
+
         Args:
-            float_array (array-like): Array of floating-point numbers to compress
-            
+            float_array (array-like): Floating-point numbers to compress.
+
         Returns:
-            bytearray: Compressed data as a byte array
+            bytearray: Compressed bitstream as byte array.  
         """
         bitstream = ""
         for num in float_array:
             full_bits = FloatBitConverter.float_to_bits(num)
-            if self.round_off:
-                round_bit = full_bits[self.keep_bits]
-                if round_bit == '1':
-                    rounded_bits = bin(int(full_bits[:self.keep_bits], 2) + 1)[2:].zfill(self.keep_bits)
-                    bitstream += rounded_bits
-                else:
-                    bitstream += full_bits[:self.keep_bits]
-            else:
-                bitstream += full_bits[:self.keep_bits]
+            preserved_bits = full_bits[:self.keep_bits]
 
+            if self.round_off:
+                # Guard bit: first bit after preserved bits
+                guard_bit = full_bits[self.keep_bits] if self.keep_bits < 64 else '0'
+                # Sticky bit: OR of all bits after guard bit
+                sticky_bits = full_bits[self.keep_bits+1:] if self.keep_bits+1 < 64 else ''
+                sticky_bit = '1' if '1' in sticky_bits else '0'
+
+                # Round up if guard bit = 1 and (sticky_bit = 1 or last preserved bit = 1)
+                round_up = guard_bit == '1' and ('1' in sticky_bit or preserved_bits[-1] == '1')
+
+                if round_up:
+                    incremented = bin(int(preserved_bits, 2) + 1)[2:].zfill(self.keep_bits)
+
+                    # Overflow detection: length increases → fallback to truncation
+                    if len(incremented) > self.keep_bits:
+                        # Overflow occurred, fallback: just keep truncated version
+                        bitstream += preserved_bits
+                    else:
+                        bitstream += incremented
+                else:
+                    bitstream += preserved_bits
+            else:
+                bitstream += preserved_bits
+
+        # Pad to byte boundary
         padded_len = math.ceil(len(bitstream) / 8) * 8
         bitstream += '0' * (padded_len - len(bitstream))
 
-        byte_array = bytearray()
-        for i in range(0, len(bitstream), 8):
-            byte = int(bitstream[i:i+8], 2)
-            byte_array.append(byte)
-
+        byte_array = bytearray(int(bitstream[i:i+8], 2) for i in range(0, len(bitstream), 8))
         return byte_array
 
 class FloatDecompressor:
@@ -92,29 +106,33 @@ class FloatDecompressor:
     def __init__(self, keep_bits=48):
         """
         Initialize the decompressor with decompression parameters.
-        
+
         Args:
-            keep_bits (int): Number of bits preserved for each float during compression
+            keep_bits (int): Number of bits preserved for each float during compression.
         """
         self.keep_bits = keep_bits
 
     def decompress(self, byte_array, num_floats):
         """
-        Decompress a byte array back into an array of floating-point numbers.
-        
+        Decompress a byte array back into floating-point numbers.
+
         Args:
-            byte_array (bytearray): The compressed data
-            num_floats (int): Number of floats to recover from the compressed data
-            
+            byte_array (bytearray): The compressed data.
+            num_floats (int): Number of floats to recover from the compressed data.
+
         Returns:
-            list: List of recovered floating-point numbers
+            list: List of recovered floating-point numbers.
         """
         bitstream = ''.join(f'{byte:08b}' for byte in byte_array)
         recovered_floats = []
         for i in range(num_floats):
             start = i * self.keep_bits
             top_bits = bitstream[start:start+self.keep_bits]
+
+            # Fill remaining bits with zeros (zero padding in mantissa → denormalized value or lower precision)
             full_bits = top_bits.ljust(64, '0')
+
+            # Reconstruct float
             recovered_floats.append(FloatBitConverter.bits_to_float(full_bits))
         return recovered_floats
 
