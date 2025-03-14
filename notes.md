@@ -43,3 +43,7 @@
 #### Final Decimal
 
 - **Value:** 939725772534.8738
+
+## Some Good References
+
+#### https://arxiv.org/pdf/2305.02283 - Baller model for lossy compression

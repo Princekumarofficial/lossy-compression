@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error
 from numba import njit
 import os
+import gzip
+import zlib
+import lzma
+import bz2
 
 @njit
 def float_to_bits_numba(f):
@@ -127,6 +131,71 @@ class FloatDecompressor:
 
         return recovered_floats
 
+class EnhancedCompressor(FloatCompressor):
+    """
+    Enhanced compressor that applies additional compression after bit-packing.
+    """
+    def __init__(self, keep_bits=48, round_off=True, algorithm='gzip', compression_level=9):
+        """
+        Initialize the enhanced compressor.
+        
+        Args:
+            keep_bits (int): Number of bits to preserve from each float
+            round_off (bool): Whether to use guard + sticky bit rounding
+            algorithm (str): Secondary compression algorithm ('gzip', 'zlib', 'lzma', 'bz2')
+            compression_level (int): Compression level (1-9, with 9 being highest)
+        """
+        super().__init__(keep_bits, round_off)
+        self.algorithm = algorithm
+        self.compression_level = compression_level
+    
+    def compress(self, float_array):
+        # First, apply bit-packing compression
+        bit_packed = super().compress(float_array)
+        
+        # Then apply secondary compression
+        if self.algorithm == 'gzip':
+            return gzip.compress(bit_packed, compresslevel=self.compression_level)
+        elif self.algorithm == 'zlib':
+            return zlib.compress(bit_packed, level=self.compression_level)
+        elif self.algorithm == 'lzma':
+            return lzma.compress(bit_packed, preset=self.compression_level)
+        elif self.algorithm == 'bz2':
+            return bz2.compress(bit_packed, compresslevel=self.compression_level)
+        else:
+            return bit_packed  # Default: return just the bit-packed data
+
+class EnhancedDecompressor(FloatDecompressor):
+    """
+    Enhanced decompressor that handles additional compression layers.
+    """
+    def __init__(self, keep_bits=48, algorithm='gzip'):
+        """
+        Initialize the enhanced decompressor.
+        
+        Args:
+            keep_bits (int): Number of bits preserved during compression
+            algorithm (str): Secondary compression algorithm used ('gzip', 'zlib', 'lzma', 'bz2')
+        """
+        super().__init__(keep_bits)
+        self.algorithm = algorithm
+    
+    def decompress(self, byte_array, num_floats):
+        # First, undo the secondary compression
+        if self.algorithm == 'gzip':
+            bit_packed = gzip.decompress(byte_array)
+        elif self.algorithm == 'zlib':
+            bit_packed = zlib.decompress(byte_array)
+        elif self.algorithm == 'lzma':
+            bit_packed = lzma.decompress(byte_array)
+        elif self.algorithm == 'bz2':
+            bit_packed = bz2.decompress(byte_array)
+        else:
+            bit_packed = byte_array  # If no secondary compression was used
+        
+        # Then, apply the original decompression
+        return super().decompress(bit_packed, num_floats)
+
 class FileHandler:
     """
     Utility class for saving and reading binary files.
@@ -186,8 +255,7 @@ class DataAnalyzer:
 
         # Histogram
         plt.figure(figsize=(10, 5))
-        plt.hist(data, bins=50, alpha=0.6, label='Original', color='skyblue')
-        plt.hist(recovered_np, bins=50, alpha=0.6, label='Compressed', color='salmon')
+        plt.hist([data, recovered_np], bins=50, label=['Original', 'Compressed'], color=['skyblue', 'salmon'], alpha=0.6)
         plt.title(f"{name.capitalize()} Distribution: Histogram Comparison")
         plt.xlabel('Value')
         plt.ylabel('Frequency')
@@ -243,7 +311,7 @@ class CompressionPipeline:
         self.decompressor = FloatDecompressor(keep_bits=keep_bits)
         self.analyzer = DataAnalyzer()
 
-    def run(self):
+    def run(self, all_data):
         """
         Run the compression pipeline on uniform, gaussian, and exponential data distributions.
         
@@ -253,15 +321,6 @@ class CompressionPipeline:
         3. Decompresses the data
         4. Analyzes and visualizes the compression results
         """
-        uniform_data = np.random.uniform(1e10, 1e12, self.size)
-        gaussian_data = np.random.normal(1e10, 1e12, self.size)
-        exponential_data = np.random.exponential(1e10, self.size)
-
-        all_data = {
-            "uniform": uniform_data,
-            "gaussian": gaussian_data,
-            "exponential": exponential_data
-        }
 
         for name, data in all_data.items():
             print(f"\n{name.capitalize()} Distribution:")
@@ -279,7 +338,71 @@ class CompressionPipeline:
             print(f"Compressed file size: {len(compressed_bytes)} bytes")
 
             self.analyzer.analyze_distribution(name, data, recovered_np)
+    
+    def run_enhanced(self, all_data):
+        """
+        Run the enhanced compression pipeline with secondary compression.
+        """
+        
+        # Test different compression algorithms
+        algorithms = ['gzip', 'zlib', 'lzma', 'bz2']
+        
+        for name, data in all_data.items():
+            print(f"\n{name.capitalize()} Distribution:")
+            data.astype(np.float64).tofile(f"{self.output_dir}/{name}_original.bin")
+            original_size = self.size * 8  # 8 bytes per float64
+            
+            # Original bit-packing only
+            compressor = FloatCompressor(keep_bits=self.keep_bits, round_off=True)
+            decompressor = FloatDecompressor(keep_bits=self.keep_bits)
+            
+            bit_packed = compressor.compress(data)
+            FileHandler.save_file(bit_packed, f"{self.output_dir}/{name}_bitpacked.bin")
+            bit_packed_size = len(bit_packed)
+            
+            print(f"Original size: {original_size} bytes")
+            print(f"Bit-packed size: {bit_packed_size} bytes ({bit_packed_size/original_size*100:.2f}%)")
+
+            self.analyzer.analyze_distribution(name, data, decompressor.decompress(bit_packed, num_floats=self.size))
+            
+            # Test each secondary compression algorithm
+            for algo in algorithms:
+                enhanced_compressor = EnhancedCompressor(
+                    keep_bits=self.keep_bits, 
+                    round_off=True,
+                    algorithm=algo
+                )
+                enhanced_decompressor = EnhancedDecompressor(
+                    keep_bits=self.keep_bits,
+                    algorithm=algo
+                )
+                
+                compressed = enhanced_compressor.compress(data)
+                FileHandler.save_file(compressed, f"{self.output_dir}/{name}_{algo}.bin")
+                
+                recovered = enhanced_decompressor.decompress(compressed, num_floats=self.size)
+                recovered_np = np.array(recovered, dtype=np.float64)
+                
+                compressed_size = len(compressed)
+                
+                print(f"{algo} size: {compressed_size} bytes ({compressed_size/original_size*100:.2f}%)")
+                
+                # Verify accuracy is maintained
+                mse = mean_squared_error(data, recovered_np)
+                print(f"{algo} MSE: {mse:.6e}")
 
 if __name__ == "__main__":
-    pipeline = CompressionPipeline(size=1000, keep_bits=56)
-    pipeline.run()
+    SIZE = 10000
+    uniform_data = np.random.uniform(1e10, 1e12, SIZE)
+    gaussian_data = np.random.normal(1e10, 1e12, SIZE)
+    exponential_data = np.random.exponential(1e10, SIZE)
+
+    all_data = {
+        "uniform": uniform_data,
+        "gaussian": gaussian_data,
+        "exponential": exponential_data
+    }
+
+    pipeline = CompressionPipeline(size=SIZE, keep_bits=56)
+    pipeline.run_enhanced(all_data)
+    
