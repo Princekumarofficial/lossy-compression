@@ -503,7 +503,7 @@ class CompressionPipeline:
                 )
         
         # Generate markdown file with results
-        self.analyzer.generate_markdown(f"enhanced_compression_results_keep_bits_{self.keep_bits}_round_{self.round_off}.md")
+        self.analyzer.generate_markdown(f"result.md")
 
 if __name__ == "__main__":
     SIZE = 10000
